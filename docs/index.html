@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Talking Smart Contracts</title>
+
+  <!-- Stellar SDK (contains Soroban RPC client as of v13) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/stellar-sdk/13.1.0/stellar-sdk.min.js"></script>
+
+  <style>
+    /* --- identical styling --- */
+    body{background:#121212;color:#00ff00;font-family:'Courier New',monospace;height:100vh;margin:0;display:flex;flex-direction:column}
+    header{background:#1f1f1f;padding:10px;text-align:center;border-bottom:1px solid #00ff00}
+    #chat{flex:1;overflow-y:auto;padding:10px;border-top:1px solid #00ff00;border-bottom:1px solid #00ff00}
+    .message{margin-bottom:8px}.message a{color:#66d9ef;text-decoration:none;margin-left:10px;font-size:.9em}.message a:hover{text-decoration:underline}
+    #status{background:#1f1f1f;padding:10px;border-top:1px solid #00ff00;font-size:.9em}#status span{color:#ffcc00}.transcript{color:#fff;font-weight:bold}
+  </style>
+</head>
+<body>
+
+<header><h1>🗣️ Talking Smart Contracts</h1></header>
+
+<div id="chat"></div>
+
+<div id="status">
+  <div>✒️ Address: <span id="address">Generating...</span></div>
+  <div>🎤 Last Said: <span class="transcript">Waiting for speech...</span></div>
+  <div>⏳ Status: <span class="status-text">Idle</span></div>
+</div>
+
+<script>
+const contractId = 'CCAK2Y7STDCRKVM6JZTDFTVK4WVDY4JKMYZRJZP4AWL4S4MCQSWZXFDK';
+const rpcUrl = 'https://soroban-testnet.stellar.org';
+const networkPassphrase = StellarSdk.Networks.TESTNET;
+const RpcServer = StellarSdk.SorobanRpc ? StellarSdk.SorobanRpc.Server : StellarSdk.rpc.Server;
+const rpc = new RpcServer(rpcUrl);
+const contract = new StellarSdk.Contract(contractId);
+
+const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+let keypair;
+
+async function init () {
+  keypair = await newAddress();
+  recognition.continuous     = true;
+  recognition.interimResults = false;
+  recognition.onresult = async (event) => {
+      const transcript = event.results[event.results.length-1][0].transcript.trim();
+      if (!transcript) return;
+      document.querySelector('.transcript').textContent = transcript;
+      document.querySelector('.status-text').textContent = 'Sending…';
+      try {
+        await sendMessage(transcript, keypair);
+        document.querySelector('.status-text').textContent = 'Sent ✔';
+      } catch (e) {
+        console.error(e);
+        document.querySelector('.status-text').textContent = 'Error ❌';
+      }
+  };
+  recognition.start();
+}
+init();
+
+async function sendMessage (spokenText, keypair) {
+  const sanitizedStr = spokenText
+            .split(' ').join('_')
+            .replace(/[^a-zA-Z0-9_]/g, '')
+            .slice(0, 32);
+  const account = await rpc.getAccount(keypair.publicKey());
+  let tx = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase
+  })
+  .addOperation(
+    contract.call(
+      'talk',
+      StellarSdk.Address.fromString(keypair.publicKey()).toScVal(),
+      StellarSdk.nativeToScVal(sanitizedStr, { type: 'symbol' })
+    )
+  )
+  .setTimeout(30)
+  .build();
+  tx = await rpc.prepareTransaction(tx);
+  tx.sign(keypair);
+  const res = await rpc.sendTransaction(tx);
+  console.log('☑ Message sent. txHash:', res.hash);
+  return res.hash;
+}
+
+function hexToUint8Array(hexString) {
+  return new Uint8Array(hexString.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+}
+
+async function fetchMessages () {
+  try {
+    const latest   = await rpc.getLatestLedger();
+    const fromLedg = latest.sequence - 8000;           // same window as server.js
+    const evResp = await rpc.getEvents({
+      startLedger: fromLedg,
+      filters: [{ type: 'contract', contractIds: [contractId] }],
+    });
+    const msgs = evResp.events.map(ev => {
+      const hexPub  = ev.topic[0]._value._value._value.toString('hex');
+      const stellar = StellarSdk.StrKey.encodeEd25519PublicKey(hexToUint8Array(hexPub));
+
+      return {
+        txHash: ev.txHash?.toString?.(),
+        addr  : stellar,
+        msg   : ev.value?._value?.toString?.().split('_').join(' ')
+      };
+    });
+
+    renderChat(msgs);
+  } catch (e) {
+    console.error('fetchMessages() failed', e);
+  }
+}
+
+function renderChat (messages) {
+  const chat = document.getElementById('chat');
+  chat.innerHTML = '';
+  messages.forEach(m => {
+    const div = document.createElement('div');
+    div.className = 'message';
+    div.innerHTML =
+      `<strong>${m.addr.slice(0,5)}…${m.addr.slice(-5)}:</strong> ${m.msg} ` +
+      `<a href="https://stellar.expert/explorer/testnet/tx/${m.txHash}" target="_blank">[view]</a>`;
+    chat.appendChild(div);
+  });
+  chat.scrollTop = chat.scrollHeight;
+}
+
+async function newAddress () {
+  const kp = StellarSdk.Keypair.random();
+  /* friendbot provides CORS headers, so this works straight from the browser */
+  await fetch(`https://friendbot.stellar.org/?addr=${kp.publicKey()}`);
+  /* wait a little so it’s definitely funded & accepted by Soroban rpc */
+  await new Promise(r => setTimeout(r, 10_000));
+  document.getElementById('address').textContent = kp.publicKey();
+  return kp;
+}
+
+fetchMessages();
+setInterval(fetchMessages, 3000);
+</script>
+
+</body>
+</html>
